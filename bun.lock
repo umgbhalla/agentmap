@@ -7,7 +7,7 @@
     },
     "cli": {
       "name": "agentmap",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "bin": {
         "agentmap": "./dist/cli.js",
       },
@@ -16,6 +16,7 @@
         "fast-glob": "^3.3.2",
         "js-yaml": "^4.1.0",
         "picomatch": "^4.0.2",
+        "smol-toml": "^1.6.0",
         "tree-sitter-go": "^0.23.4",
         "tree-sitter-javascript": "^0.23.1",
         "tree-sitter-python": "^0.23.6",
@@ -33,7 +34,7 @@
     },
     "opencode": {
       "name": "@agentmap/opencode",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "agentmap": "workspace:*",
       },
@@ -106,6 +107,8 @@
     "reusify": ["reusify@1.1.0", "", {}, "sha512-g6QUff04oZpHs0eG5p83rFLhHeV00ug/Yf9nZM6fLeUrPguBTkTQOdpAWWspMh55TZfVQDPaN3NQJfbVRAxdIw=="],
 
     "run-parallel": ["run-parallel@1.2.0", "", { "dependencies": { "queue-microtask": "^1.2.2" } }, "sha512-5l4VyZR86LZ/lDxZTR6jqL8AFE2S0IFLMP26AbjsLVADxHdhB/c0GUsH+y39UfCi3dzz8OlQuPmnaJOMoDHQBA=="],
+
+    "smol-toml": ["smol-toml@1.6.0", "", {}, "sha512-4zemZi0HvTnYwLfrpk/CF9LOd9Lt87kAt50GnqhMpyF9U3poDAP2+iukq2bZsO/ufegbYehBkqINbsWxj4l4cw=="],
 
     "to-regex-range": ["to-regex-range@5.0.1", "", { "dependencies": { "is-number": "^7.0.0" } }, "sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ=="],
 

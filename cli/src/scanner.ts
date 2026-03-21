@@ -8,6 +8,7 @@ import { join, normalize, dirname, relative } from 'path'
 import { extractMarker } from './extract/marker.js'
 import { extractDefinitions } from './extract/definitions.js'
 import { getAllDiffData, applyDiffToDefinitions } from './extract/git-status.js'
+import { parseCargoToml, getCargoDescription, isRustStructuralFile, type CargoManifest } from './extract/cargo.js'
 import { parseCode, detectLanguage, LANGUAGE_EXTENSIONS } from './parser/index.js'
 import type { FileResult, GenerateOptions, FileDiff, FileDiffStats } from './types.js'
 
@@ -82,6 +83,64 @@ async function getGlobFiles(dir: string): Promise<string[]> {
   })
 }
 
+interface CrateInfo {
+  cargoPath: string
+  manifest: CargoManifest
+  sourcePrefix: string
+  description: string
+}
+
+/**
+ * Check if a file is a Cargo.toml
+ */
+function isCargoToml(filepath: string): boolean {
+  return filepath === 'Cargo.toml' || filepath.endsWith('/Cargo.toml') || filepath.endsWith('\\Cargo.toml')
+}
+
+/**
+ * Build a map of source prefixes to their crate info from Cargo.toml files.
+ * Only includes package crates (not workspace-only roots without a [package]).
+ */
+async function buildCrateMap(cargoFiles: string[], dir: string): Promise<Map<string, CrateInfo>> {
+  const crateMap = new Map<string, CrateInfo>()
+
+  for (const cargoPath of cargoFiles) {
+    try {
+      const fullPath = join(dir, cargoPath)
+      const manifest = await parseCargoToml(fullPath)
+
+      if (!manifest.isPackage) continue
+
+      const cargoDir = cargoPath === 'Cargo.toml' ? '' : dirname(cargoPath).replace(/\\/g, '/') + '/'
+      const sourcePrefix = cargoDir + 'src/'
+
+      crateMap.set(sourcePrefix, {
+        cargoPath,
+        manifest,
+        sourcePrefix,
+        description: getCargoDescription(manifest),
+      })
+    } catch {
+      // Skip unparseable Cargo.toml files
+    }
+  }
+
+  return crateMap
+}
+
+/**
+ * Find the crate that owns a given file path
+ */
+function findCrateForFile(relativePath: string, crateMap: Map<string, CrateInfo>): CrateInfo | null {
+  const normalized = relativePath.replace(/\\/g, '/')
+  for (const [prefix, info] of crateMap) {
+    if (normalized.startsWith(prefix)) {
+      return info
+    }
+  }
+  return null
+}
+
 /**
  * Scan directory and process files with header comments
  */
@@ -99,19 +158,22 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<File
     files = await getGlobFiles(dir)
   }
 
-  // Filter by supported extensions
-  files = files.filter(isSupportedFile)
+  // Separate Cargo.toml files from source files
+  const cargoTomlFiles = files.filter(isCargoToml)
+  const sourceFiles = files.filter(isSupportedFile)
 
   // Filter by ignore patterns
-  if (ignorePatterns.length > 0) {
-    const isIgnored = picomatch(ignorePatterns)
-    files = files.filter(f => !isIgnored(f))
-  }
+  const filteredSourceFiles = ignorePatterns.length > 0
+    ? sourceFiles.filter(f => !picomatch(ignorePatterns)(f))
+    : sourceFiles
+
+  // Build crate map from Cargo.toml files
+  const crateMap = await buildCrateMap(cargoTomlFiles, dir)
 
   // Get git diff data if needed (isolated from main processing)
   let fileStats: Map<string, FileDiffStats> | null = null
   let fileDiffs: Map<string, FileDiff> | null = null
-  
+
   if (includeDiff && isGitRepo(dir)) {
     try {
       const diffData = getAllDiffData(dir)
@@ -124,18 +186,46 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<File
     }
   }
 
-  // Process each file
   const results: FileResult[] = []
 
-  for (const relativePath of files) {
+  // Process Cargo.toml files as map entries
+  for (const cargoPath of cargoTomlFiles) {
+    const crate = [...crateMap.values()].find(c => c.cargoPath === cargoPath)
+    // Also handle workspace-only Cargo.toml (no [package])
+    if (crate) {
+      results.push({
+        relativePath: cargoPath,
+        description: crate.description,
+        definitions: [],
+        submap: resolveSubmap(undefined, cargoPath),
+      })
+    } else {
+      // Workspace root without [package]
+      try {
+        const manifest = await parseCargoToml(join(dir, cargoPath))
+        if (manifest.isWorkspace) {
+          results.push({
+            relativePath: cargoPath,
+            description: getCargoDescription(manifest),
+            definitions: [],
+            submap: resolveSubmap(undefined, cargoPath),
+          })
+        }
+      } catch {
+        // Skip
+      }
+    }
+  }
+
+  // Process source files
+  for (const relativePath of filteredSourceFiles) {
     const fullPath = join(dir, relativePath)
-    // Normalize path for lookup (handle Windows backslashes)
     const normalizedPath = relativePath.replace(/\\/g, '/')
 
     try {
       const fileDiff = fileDiffs?.get(normalizedPath)
       const stats = fileStats?.get(normalizedPath)
-      const result = await processFile(fullPath, relativePath, fileDiff, stats)
+      const result = await processFile(fullPath, relativePath, fileDiff, stats, crateMap)
       if (result) {
         results.push(result)
       }
@@ -181,24 +271,71 @@ function resolveSubmap(submap: string | undefined, relativePath: string): string
 }
 
 /**
- * Process a single file - check for marker and extract definitions
+ * Process a single file - check for marker and extract definitions.
+ * For .rs files in known Cargo crates, auto-includes even without header comments.
  */
 async function processFile(
   fullPath: string,
   relativePath: string,
   fileDiff?: FileDiff,
-  fileStats?: FileDiffStats
+  fileStats?: FileDiffStats,
+  crateMap?: Map<string, CrateInfo>
 ): Promise<FileResult | null> {
   // Check for marker first (only reads first 30KB)
   const marker = await extractMarker(fullPath)
-  if (!marker.found) {
-    return null
-  }
 
   // Detect language
   const language = detectLanguage(relativePath)
   if (!language) {
     return null
+  }
+
+  // If no marker found, check if this is a .rs file in a known crate
+  if (!marker.found) {
+    if (language !== 'rust' || !crateMap?.size) {
+      return null
+    }
+
+    const crate = findCrateForFile(relativePath, crateMap)
+    if (!crate) {
+      return null
+    }
+
+    // Read and parse for definitions
+    const code = await readFile(fullPath, 'utf8')
+    const tree = await parseCode(code, language)
+    let definitions = extractDefinitions(tree.rootNode, language)
+
+    if (fileDiff) {
+      definitions = applyDiffToDefinitions(definitions, fileDiff)
+    }
+
+    // Auto-include: structural files always, others only if they have definitions
+    const isStructural = isRustStructuralFile(relativePath)
+    if (!isStructural && definitions.length === 0) {
+      return null
+    }
+
+    // Use crate description for entry points, module name for mod.rs
+    let description: string | undefined
+    const basename = relativePath.split(/[/\\]/).pop()
+    if (basename === 'main.rs' || basename === 'lib.rs') {
+      const kind = basename === 'main.rs' ? 'Binary' : 'Library'
+      description = `${kind} entry point for ${crate.manifest.packageName}`
+    } else if (basename === 'mod.rs') {
+      const parentDir = relativePath.split(/[/\\]/).slice(-2, -1)[0]
+      if (parentDir) {
+        description = `Module: ${parentDir}`
+      }
+    }
+
+    return {
+      relativePath,
+      description,
+      definitions,
+      submap: resolveSubmap(undefined, relativePath),
+      diff: fileStats,
+    }
   }
 
   // Read full file for parsing

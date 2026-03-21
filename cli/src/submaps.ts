@@ -72,13 +72,13 @@ function insertFile(root: MapNode, relativePath: string, result: FileResult): vo
   const entry: FileEntry = {}
 
   if (result.description) {
-    entry.desc = result.description
+    entry.description = result.description
   }
 
   if (result.definitions.length > 0) {
     entry.defs = {}
     for (const def of result.definitions) {
-      entry.defs[def.name] = def.line
+      entry.defs[def.name] = `line ${def.line}`
     }
   }
 
@@ -141,7 +141,7 @@ function buildSubmapSummary(files: FileResult[], submap: string): MapNode {
     
     // Just description for summary
     const filename = parts[parts.length - 1]
-    current[filename] = { desc: file.description || 'No description' }
+    current[filename] = { description: file.description || 'No description' }
   }
   
   return { [submapName]: root }
@@ -220,7 +220,7 @@ export function generateSubmapOutputs(
     
     // Add _submaps under root with explanatory comment
     const rootNode = rootContent[rootName] as MapNode
-    rootNode['# See full detail & definitions per the paths below'] = null
+    rootNode['# See full detail & definitions per the paths below'] = {} as MapNode
     rootNode._submaps = submapsNode
   }
   
@@ -301,12 +301,12 @@ function toMarkdown(obj: MapNode, depth: number = 0): string {
     if (value === null) continue
     
     // Check if it's a file entry (has desc or defs)
-    const isFile = value && typeof value === 'object' && ('desc' in value || 'defs' in value)
+    const isFile = value && typeof value === 'object' && ('description' in value || 'defs' in value)
     
     if (isFile) {
       const entry = value as FileEntry
       // File: use bold for filename
-      lines.push(`${indent}- **${key}**${entry.desc ? `: ${entry.desc}` : ''}`)
+      lines.push(`${indent}- **${key}**${entry.description ? `: ${entry.description}` : ''}`)
       
       if (entry.defs && Object.keys(entry.defs).length > 0) {
         const defList = Object.entries(entry.defs)
