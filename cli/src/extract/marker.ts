@@ -12,6 +12,17 @@ const MAX_LINES = 50
 const MAX_DESC_LINES = 25
 
 /**
+ * Regex to match @agentmap marker with optional submap
+ * Captures: submap (optional, the part after :)
+ * Examples:
+ *   @agentmap        -> submap: undefined
+ *   @agentmap:.      -> submap: "."
+ *   @agentmap:..     -> submap: ".."
+ *   @agentmap:src/common -> submap: "src/common"
+ */
+const SUBMAP_REGEX = /@agentmap(?::([^\s*]+))?/
+
+/**
  * Patterns that strongly indicate a license/copyright comment.
  * These are checked against comment text.
  */
@@ -41,11 +52,11 @@ function isLicenseComment(text: string): boolean {
 function truncateDescription(lines: string[]): string {
   const trimmed = lines.join('\n').trim()
   const trimmedLines = trimmed.split('\n')
-  
+
   if (trimmedLines.length <= MAX_DESC_LINES) {
     return trimmed
   }
-  
+
   const truncated = trimmedLines.slice(0, MAX_DESC_LINES)
   const remaining = trimmedLines.length - MAX_DESC_LINES
   truncated.push(`... and ${remaining} more lines`)
@@ -55,7 +66,7 @@ function truncateDescription(lines: string[]): string {
 /**
  * Extract header comment/docstring from a file.
  * Uses tree-sitter for clean AST-based extraction.
- * 
+ *
  * Supports:
  * - // line comments (JS/TS/Go/Rust)
  * - /* block comments (JS/TS/Go/Rust)
@@ -74,7 +85,7 @@ export async function extractMarker(filepath: string): Promise<MarkerResult> {
     // File couldn't be read - skip silently
     return { found: false }
   }
-  
+
   return extractMarkerFromCode(head, language)
 }
 
@@ -86,7 +97,7 @@ export async function extractMarkerFromCode(code: string, language: Language): P
   // Only parse first MAX_LINES worth of content for efficiency
   const lines = code.split('\n').slice(0, MAX_LINES)
   const head = lines.join('\n')
-  
+
   const tree = await parseCode(head, language)
   const description = extractHeaderFromAST(tree.rootNode, language)
 
@@ -94,9 +105,18 @@ export async function extractMarkerFromCode(code: string, language: Language): P
     return { found: false }
   }
 
+  // Extract submap from @agentmap marker if present in description
+  // (only check description, not raw file content, to avoid false positives in strings)
+  const submapMatch = description ? SUBMAP_REGEX.exec(description) : null
+  const submap = submapMatch?.[1]
+
+  // Clean the @agentmap marker from description if present
+  const cleanDesc = description.replace(SUBMAP_REGEX, '').trim()
+
   return {
     found: true,
-    description: description || undefined,
+    description: cleanDesc || undefined,
+    submap,
   }
 }
 
@@ -128,7 +148,7 @@ function extractHeaderFromAST(root: SyntaxNode, language: Language): string | nu
   // Python/shell: comment node starting with #!
   // JS/TS: hash_bang_line node
   const firstChild = children[0]
-  if (firstChild?.type === 'hash_bang_line' || 
+  if (firstChild?.type === 'hash_bang_line' ||
       (firstChild?.type === 'comment' && firstChild.text.startsWith('#!'))) {
     shebang = firstChild.text.trim()
     startIdx = 1
@@ -184,22 +204,22 @@ function extractConsecutiveCommentsSkipLicense(
   language: Language
 ): string | null {
   let idx = startIdx
-  
+
   while (idx < children.length) {
     const node = children[idx]
-    
+
     // Skip non-comment nodes (might be blank lines, etc.)
     if (!isCommentNode(node)) {
       idx++
       continue
     }
-    
+
     const text = extractCommentText(node, language)
     if (text === null) {
       idx++
       continue
     }
-    
+
     // Check if this comment is a license
     if (isLicenseComment(text)) {
       // Skip this license comment
@@ -207,11 +227,11 @@ function extractConsecutiveCommentsSkipLicense(
       // Continue to skip any consecutive license comments
       continue
     }
-    
+
     // Found a non-license comment - extract from here
     return extractConsecutiveComments(children, idx, language)
   }
-  
+
   return null
 }
 

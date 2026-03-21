@@ -2,10 +2,11 @@
 // CLI entrypoint for generating codebase maps.
 
 import { writeFile } from 'fs/promises'
-import { resolve } from 'path'
+import { resolve, extname } from 'path'
 import { goke } from 'goke'
-import { generateMap, toYaml } from './index.js'
+import { generateMap, generateSubmaps, toYaml } from './index.js'
 import { createConsoleLogger } from './logger.js'
+import type { OutputFormat } from './types.js'
 
 const cli = goke('agentmap')
 const logger = createConsoleLogger()
@@ -15,6 +16,10 @@ interface CliOptions {
   ignore?: string | string[] | null
   filter?: string | string[] | null
   noSubmodules?: boolean
+  submaps?: boolean
+  dir?: string
+  dryRun?: boolean
+  verbose?: boolean
 }
 
 function normalizePatterns(value: string | string[] | null | undefined): string[] | undefined {
@@ -39,16 +44,58 @@ To include a file in the map, add a comment at the top:
 The description will appear in the 'desc' field of the output.
 `
 
+/**
+ * Detect format from filename extension
+ */
+function detectFormat(filename: string): OutputFormat {
+  const ext = extname(filename).toLowerCase()
+  return ext === '.md' ? 'md' : 'yaml'
+}
+
 cli
   .command('[dir]', 'Generate a YAML map of the codebase')
   .option('-o, --output <file>', 'Write output to file (default: stdout)')
   .option('-i, --ignore <pattern>', 'Ignore pattern (can be repeated)')
   .option('-f, --filter <pattern>', 'Filter pattern - only include matching files (can be repeated)')
   .option('--no-submodules', 'Exclude submodule info from the map')
+  .option('--submaps', 'Enable submaps: respect @agentmap:path markers, output nested files')
+  .option('--dir <dir>', 'Subdirectory for map files (e.g., .ruler)')
+  .option('--dry-run', 'Show what would be written without writing')
+  .option('--verbose', 'Show submap resolution details')
   .action(async (dir: string | undefined, options: CliOptions) => {
     const targetDir = resolve(dir ?? '.')
+    const outputFile = options.output ?? 'map.yaml'
+    const format = detectFormat(outputFile)
 
     try {
+      // Submaps mode: create root + nested files
+      if (options.submaps) {
+        const result = await generateSubmaps({
+          dir: targetDir,
+          ignore: normalizePatterns(options.ignore),
+          outDir: options.dir,
+          outputFile,
+          format,
+          dryRun: options.dryRun,
+          verbose: options.verbose,
+        })
+
+        if (result.fileCount === 0) {
+          console.error(NO_FILES_MESSAGE)
+          process.exit(0)
+        }
+
+        if (options.verbose || options.dryRun) {
+          console.error(`\nProcessed ${result.fileCount} files across ${result.submapCount} submaps`)
+        }
+
+        if (!options.dryRun) {
+          console.error(`Wrote ${result.submapCount} map file(s)`)
+        }
+        return
+      }
+
+      // Standard single-file mode
       const map = await generateMap({
         dir: targetDir,
         ignore: normalizePatterns(options.ignore),
