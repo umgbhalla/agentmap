@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @agentmap:.
 // CLI entrypoint for generating codebase maps.
 
 import { writeFile } from 'fs/promises'

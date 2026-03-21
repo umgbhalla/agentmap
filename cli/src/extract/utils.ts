@@ -1,3 +1,4 @@
+// @agentmap:.
 // Shared utilities for file extraction.
 
 import { open } from 'fs/promises'

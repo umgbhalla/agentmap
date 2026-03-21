@@ -1,3 +1,4 @@
+// @agentmap:.
 // Extract description from markdown files using marked AST.
 
 import { Lexer, type Token, type Tokens } from 'marked'

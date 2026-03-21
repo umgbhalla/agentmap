@@ -1,3 +1,4 @@
+// @agentmap:.
 // Zig language support for agentmap.
 
 import type { SyntaxNode, DefinitionType } from '../types.js'

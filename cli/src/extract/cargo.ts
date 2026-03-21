@@ -1,3 +1,4 @@
+// @agentmap:.
 // Extract project metadata from Cargo.toml files.
 // Enables agentmap to understand Rust workspace and crate structure.
 

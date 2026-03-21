@@ -1,3 +1,4 @@
+// @agentmap:.
 // Truncate definitions in map to limit context size.
 
 import type { DefEntry, FileEntry, MapNode, SubmoduleEntry } from '../types.js'

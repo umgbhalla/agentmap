@@ -1,3 +1,4 @@
+// @agentmap:.
 // Language registry for agentmap.
 // Aggregates all language-specific implementations.
 

@@ -1,3 +1,4 @@
+// @agentmap:.
 // Library exports for programmatic usage.
 
 import { execSync } from 'child_process'

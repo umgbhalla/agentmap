@@ -1,3 +1,4 @@
+// @agentmap:.
 // Detect git submodules, their branches, and dirty state.
 // Uses multiple git commands with safeExec for cross-platform reliability.
 

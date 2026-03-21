@@ -1,3 +1,4 @@
+// @agentmap:.
 // Scan directory for files with header comments/docstrings.
 
 import { execSync } from 'child_process'

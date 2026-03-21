@@ -1,3 +1,4 @@
+// @agentmap:.
 // Extract file header comment/docstring using tree-sitter.
 // Detects standard comment styles from existing projects.
 // Automatically skips license headers (Copyright, SPDX, etc.).
