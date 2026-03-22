@@ -50,6 +50,14 @@ export interface SubmoduleEntry {
 }
 
 /**
+ * A submodule node in the map.
+ * Carries submodule metadata and can also contain nested files/directories.
+ */
+export interface SubmoduleNode extends SubmoduleEntry {
+  [name: string]: MapNode | FileEntry | SubmoduleNode | string | undefined
+}
+
+/**
  * Info about a git submodule discovered in the repo
  */
 export interface SubmoduleInfo {
@@ -71,7 +79,7 @@ export interface SubmoduleInfo {
  * Recursive map node - either a directory (with children), a file entry, or a submodule entry
  */
 export interface MapNode {
-  [name: string]: MapNode | FileEntry | SubmoduleEntry
+  [name: string]: MapNode | FileEntry | SubmoduleNode
 }
 
 /**

@@ -1,7 +1,8 @@
 // @agentmap:.
-// Scan directory for files with header comments/docstrings.
+// Scan directory for files with header comments/docstrings and recurse into submodules.
 
 import { execSync } from 'child_process'
+import { realpathSync } from 'fs'
 import pLimit from 'p-limit'
 import picomatch from 'picomatch'
 import { readFile } from 'fs/promises'
@@ -14,6 +15,7 @@ import { parseCargoToml, getCargoDescription, isRustStructuralFile, type CargoMa
 import { createConsoleLogger } from './logger.js'
 import { parseCode, detectLanguage, LANGUAGE_EXTENSIONS } from './parser/index.js'
 import type { FileResult, GenerateOptions, FileDiff, FileDiffStats, SubmoduleInfo } from './types.js'
+import type { Logger } from './logger.js'
 
 /**
  * Maximum number of files to process (safety limit)
@@ -83,6 +85,17 @@ interface CrateInfo {
   description: string
 }
 
+interface ScanRepoOptions {
+  repoDir: string
+  pathPrefix: string
+  includeDiff: boolean
+  includeSubmodules: boolean
+  logger: Logger
+  isIncluded?: (path: string) => boolean
+  isIgnored?: (path: string) => boolean
+  visitedRepoDirs: Set<string>
+}
+
 /**
  * Check if a file is a Cargo.toml
  */
@@ -90,11 +103,28 @@ function isCargoToml(filepath: string): boolean {
   return filepath === 'Cargo.toml' || filepath.endsWith('/Cargo.toml') || filepath.endsWith('\\Cargo.toml')
 }
 
+function normalizeRelativePath(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+function joinRelativePath(prefix: string, path: string): string {
+  const normalizedPath = normalizeRelativePath(path)
+  return prefix ? `${prefix}/${normalizedPath}` : normalizedPath
+}
+
+function getCanonicalRepoDir(dir: string): string {
+  try {
+    return realpathSync(dir)
+  } catch {
+    return dir
+  }
+}
+
 /**
  * Build a map of source prefixes to their crate info from Cargo.toml files.
  * Only includes package crates (not workspace-only roots without a [package]).
  */
-async function buildCrateMap(cargoFiles: string[], dir: string): Promise<Map<string, CrateInfo>> {
+async function buildCrateMap(cargoFiles: string[], dir: string, pathPrefix: string): Promise<Map<string, CrateInfo>> {
   const crateMap = new Map<string, CrateInfo>()
 
   for (const cargoPath of cargoFiles) {
@@ -105,10 +135,11 @@ async function buildCrateMap(cargoFiles: string[], dir: string): Promise<Map<str
       if (!manifest.isPackage) continue
 
       const cargoDir = cargoPath === 'Cargo.toml' ? '' : dirname(cargoPath).replace(/\\/g, '/') + '/'
-      const sourcePrefix = cargoDir + 'src/'
+      const sourcePrefix = joinRelativePath(pathPrefix, cargoDir + 'src/')
+      const prefixedCargoPath = joinRelativePath(pathPrefix, cargoPath)
 
       crateMap.set(sourcePrefix, {
-        cargoPath,
+        cargoPath: prefixedCargoPath,
         manifest,
         sourcePrefix,
         description: getCargoDescription(manifest),
@@ -166,6 +197,158 @@ function resolveSubmap(submap: string | undefined, relativePath: string): string
   return submap.endsWith('/') ? submap : submap + '/'
 }
 
+function isPathIncluded(
+  relativePath: string,
+  isIncluded?: (path: string) => boolean,
+  isIgnored?: (path: string) => boolean
+): boolean {
+  if (isIncluded && !isIncluded(relativePath)) {
+    return false
+  }
+
+  if (isIgnored && isIgnored(relativePath)) {
+    return false
+  }
+
+  return true
+}
+
+async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
+  const canonicalRepoDir = getCanonicalRepoDir(options.repoDir)
+  if (options.visitedRepoDirs.has(canonicalRepoDir)) {
+    return { files: [], submodules: [] }
+  }
+  options.visitedRepoDirs.add(canonicalRepoDir)
+
+  let submodules: SubmoduleInfo[] = []
+  const directSubmodules = options.includeSubmodules ? getSubmodules(options.repoDir) : []
+  const directSubmodulePathSet = options.includeSubmodules
+    ? new Set(directSubmodules.map(submodule => submodule.path))
+    : getSubmodulePaths(options.repoDir)
+
+  if (options.includeSubmodules) {
+    submodules = directSubmodules.map(submodule => ({
+      ...submodule,
+      path: joinRelativePath(options.pathPrefix, submodule.path),
+    }))
+  }
+
+  const normalizedSubmodulePaths = new Set<string>()
+  for (const path of directSubmodulePathSet) {
+    normalizedSubmodulePaths.add(normalize(path))
+  }
+
+  let files = getGitFiles(options.repoDir)
+  files = files.filter(file => !normalizedSubmodulePaths.has(file))
+
+  const cargoTomlFiles = files.filter(file => {
+    const relativePath = joinRelativePath(options.pathPrefix, file)
+    return isCargoToml(file) && isPathIncluded(relativePath, options.isIncluded, options.isIgnored)
+  })
+
+  files = files.filter(file => isSupportedFile(file) || isReadmeFile(file))
+  files = files.filter(file => {
+    const relativePath = joinRelativePath(options.pathPrefix, file)
+    return isPathIncluded(relativePath, options.isIncluded, options.isIgnored)
+  })
+
+  if (files.length > MAX_FILES) {
+    options.logger.warn(`Warning: Too many files (${files.length} > ${MAX_FILES}), skipping scan`)
+    return { files: [], submodules }
+  }
+
+  const crateMap = await buildCrateMap(cargoTomlFiles, options.repoDir, options.pathPrefix)
+
+  let fileStats: Map<string, FileDiffStats> | null = null
+  let fileDiffs: Map<string, FileDiff> | null = null
+
+  if (options.includeDiff) {
+    try {
+      const diffData = getAllDiffData(options.repoDir, directSubmodulePathSet, options.logger)
+      fileStats = diffData.fileStats
+      fileDiffs = diffData.fileDiffs
+    } catch {
+      fileStats = null
+      fileDiffs = null
+    }
+  }
+
+  const cargoResults: FileResult[] = []
+  for (const cargoPath of cargoTomlFiles) {
+    const prefixedCargoPath = joinRelativePath(options.pathPrefix, cargoPath)
+    const crate = [...crateMap.values()].find(c => c.cargoPath === prefixedCargoPath)
+
+    if (crate) {
+      cargoResults.push({
+        relativePath: prefixedCargoPath,
+        description: crate.description,
+        definitions: [],
+        submap: resolveSubmap(undefined, prefixedCargoPath),
+      })
+    } else {
+      try {
+        const manifest = await parseCargoToml(join(options.repoDir, cargoPath))
+        if (manifest.isWorkspace) {
+          cargoResults.push({
+            relativePath: prefixedCargoPath,
+            description: getCargoDescription(manifest),
+            definitions: [],
+            submap: resolveSubmap(undefined, prefixedCargoPath),
+          })
+        }
+      } catch {
+        // Skip
+      }
+    }
+  }
+
+  const limit = pLimit(20)
+  const resultPromises = files.map(relativePath => {
+    const fullPath = join(options.repoDir, relativePath)
+    const normalizedPath = normalizeRelativePath(relativePath)
+    const prefixedRelativePath = joinRelativePath(options.pathPrefix, relativePath)
+    const fileDiff = fileDiffs?.get(normalizedPath)
+    const stats = fileStats?.get(normalizedPath)
+
+    return limit(async () => {
+      try {
+        return await processFile(fullPath, prefixedRelativePath, fileDiff, stats, crateMap)
+      } catch {
+        return null
+      }
+    })
+  })
+
+  const nestedResults = options.includeSubmodules
+    ? await Promise.all(directSubmodules.map(async submodule => {
+      if (!submodule.initialized) {
+        return { files: [], submodules: [] }
+      }
+
+      return scanRepo({
+        ...options,
+        repoDir: join(options.repoDir, submodule.path),
+        pathPrefix: joinRelativePath(options.pathPrefix, submodule.path),
+      })
+    }))
+    : []
+
+  const results = await Promise.all(resultPromises)
+
+  for (const nested of nestedResults) {
+    submodules.push(...nested.submodules)
+  }
+
+  return {
+    files: [
+      ...cargoResults,
+      ...results.filter((result): result is FileResult => result !== null),
+      ...nestedResults.flatMap(result => result.files),
+    ],
+    submodules,
+  }
+}
+
 /**
  * Scan directory and process files with header comments
  */
@@ -175,131 +358,16 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
   // Filter out null/undefined/empty patterns (some CLI parsers can pass [null] when option is not used)
   const ignorePatterns = (options.ignore ?? []).filter((p): p is string => !!p)
   const filterPatterns = (options.filter ?? []).filter((p): p is string => !!p)
-  const includeDiff = options.diff ?? false
-  const includeSubmodules = options.submodules !== false // default true
-
-  // Detect submodules first (needed for both map entries and diff filtering)
-  let submodules: SubmoduleInfo[] = []
-  let submodulePathSet: Set<string> = new Set()
-  if (includeSubmodules) {
-    submodules = getSubmodules(dir)
-    submodulePathSet = new Set(submodules.map(s => s.path))
-  } else {
-    // Even when not showing submodules, detect paths for diff filtering
-    submodulePathSet = getSubmodulePaths(dir)
-  }
-
-  // Build a normalized set for filtering (handles Windows backslash paths)
-  const normalizedSubmodulePaths = new Set<string>()
-  for (const p of submodulePathSet) {
-    normalizedSubmodulePaths.add(normalize(p))
-  }
-
-  // Get file list from git (caller should ensure we're in a git repo)
-  let files = getGitFiles(dir)
-
-  // Filter out submodule gitlink entries (they appear as paths in ls-files)
-  // Use normalized paths to handle Windows backslash vs forward slash differences
-  files = files.filter(f => !normalizedSubmodulePaths.has(f))
-
-  // Separate Cargo.toml files from the rest
-  const cargoTomlFiles = files.filter(isCargoToml)
-
-  // Filter by supported extensions or README files
-  files = files.filter(f => isSupportedFile(f) || isReadmeFile(f))
-
-  // Filter by filter patterns (only include matching files)
-  if (filterPatterns.length > 0) {
-    const isIncluded = picomatch(filterPatterns)
-    files = files.filter(f => isIncluded(f))
-  }
-
-  // Filter by ignore patterns
-  if (ignorePatterns.length > 0) {
-    const isIgnored = picomatch(ignorePatterns)
-    files = files.filter(f => !isIgnored(f))
-  }
-
-  // Build crate map from Cargo.toml files
-  const crateMap = await buildCrateMap(cargoTomlFiles, dir)
-
-  // Safety check: bail if too many files to avoid scanning huge directories
-  if (files.length > MAX_FILES) {
-    logger.warn(`Warning: Too many files (${files.length} > ${MAX_FILES}), skipping scan`)
-    return { files: [], submodules }
-  }
-
-  // Get git diff data if needed (isolated from main processing)
-  let fileStats: Map<string, FileDiffStats> | null = null
-  let fileDiffs: Map<string, FileDiff> | null = null
-
-  if (includeDiff) {
-    try {
-      const diffData = getAllDiffData(dir, submodulePathSet, logger)
-      fileStats = diffData.fileStats
-      fileDiffs = diffData.fileDiffs
-    } catch {
-      // Diff failed - continue without diff info
-      fileStats = null
-      fileDiffs = null
-    }
-  }
-
-  // Process Cargo.toml files as map entries
-  const cargoResults: FileResult[] = []
-  for (const cargoPath of cargoTomlFiles) {
-    const crate = [...crateMap.values()].find(c => c.cargoPath === cargoPath)
-    // Also handle workspace-only Cargo.toml (no [package])
-    if (crate) {
-      cargoResults.push({
-        relativePath: cargoPath,
-        description: crate.description,
-        definitions: [],
-        submap: resolveSubmap(undefined, cargoPath),
-      })
-    } else {
-      // Workspace root without [package]
-      try {
-        const manifest = await parseCargoToml(join(dir, cargoPath))
-        if (manifest.isWorkspace) {
-          cargoResults.push({
-            relativePath: cargoPath,
-            description: getCargoDescription(manifest),
-            definitions: [],
-            submap: resolveSubmap(undefined, cargoPath),
-          })
-        }
-      } catch {
-        // Skip
-      }
-    }
-  }
-
-  // Process files in parallel with concurrency limit
-  const limit = pLimit(20)
-
-  const resultPromises = files.map(relativePath => {
-    const fullPath = join(dir, relativePath)
-    // Normalize path for lookup (handle Windows backslashes)
-    const normalizedPath = relativePath.replace(/\\/g, '/')
-    const fileDiff = fileDiffs?.get(normalizedPath)
-    const stats = fileStats?.get(normalizedPath)
-
-    return limit(async () => {
-      try {
-        return await processFile(fullPath, relativePath, fileDiff, stats, crateMap)
-      } catch {
-        // Skip files that fail to process
-        return null
-      }
-    })
+  return scanRepo({
+    repoDir: dir,
+    pathPrefix: '',
+    includeDiff: options.diff ?? false,
+    includeSubmodules: options.submodules !== false,
+    logger,
+    isIncluded: filterPatterns.length > 0 ? picomatch(filterPatterns) : undefined,
+    isIgnored: ignorePatterns.length > 0 ? picomatch(ignorePatterns) : undefined,
+    visitedRepoDirs: new Set(),
   })
-
-  const results = await Promise.all(resultPromises)
-  return {
-    files: [...cargoResults, ...results.filter((r): r is FileResult => r !== null)],
-    submodules,
-  }
 }
 
 /**

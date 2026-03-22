@@ -32,6 +32,7 @@ export type {
   MarkerResult,
   SubmoduleEntry,
   SubmoduleInfo,
+  SubmoduleNode,
   OutputFormat,
   SubmapOutputOptions,
   SubmapFiles,
