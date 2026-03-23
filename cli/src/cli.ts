@@ -21,15 +21,24 @@ interface CliOptions {
   dir?: string
   dryRun?: boolean
   verbose?: boolean
+  maxDescChars?: string | number | null
 }
 
-function normalizePatterns(value: string | string[] | null | undefined): string[] | undefined {
-  if (value == null) {
+function normalizePatterns(value: unknown): string[] | undefined {
+  if (typeof value === 'string') {
+    const normalized = value.trim()
+    return normalized ? [normalized] : undefined
+  }
+
+  if (!Array.isArray(value)) {
     return undefined
   }
 
-  const values = Array.isArray(value) ? value : [value]
-  const normalized = values.map(v => v.trim()).filter(Boolean)
+  const normalized = value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map(entry => entry.trim())
+    .filter(Boolean)
+
   return normalized.length > 0 ? normalized : undefined
 }
 
@@ -63,6 +72,7 @@ cli
   .option('--dir <dir>', 'Subdirectory for map files (e.g., .ruler)')
   .option('--dry-run', 'Show what would be written without writing')
   .option('--verbose', 'Show submap resolution details')
+  .option('--max-desc-chars <chars>', 'Max characters for descriptions (default: 300, rounds up to full line)')
   .action(async (dir: string | undefined, options: CliOptions) => {
     const targetDir = resolve(dir ?? '.')
     const outputFile = options.output ?? 'map.yaml'
@@ -103,6 +113,9 @@ cli
         filter: normalizePatterns(options.filter),
         diff: true,
         submodules: options.noSubmodules ? false : undefined,
+        maxDescChars: options.maxDescChars != null && Number.isFinite(Number(options.maxDescChars)) && Number(options.maxDescChars) > 0
+          ? Number(options.maxDescChars)
+          : undefined,
         logger,
       })
 

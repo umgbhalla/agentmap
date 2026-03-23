@@ -10,7 +10,7 @@ import type { MarkerResult, Language, SyntaxNode } from '../types.js'
 export { extractMarkdownDescription } from './markdown.js'
 
 const MAX_LINES = 50
-const MAX_DESC_LINES = 25
+const MAX_DESC_LINES = 20
 
 /**
  * Regex to match @agentmap marker with optional submap
