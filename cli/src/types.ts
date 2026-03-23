@@ -143,6 +143,8 @@ export interface FileResult {
   /** Resolved submap path (absolute from project root, e.g., "./" or "src/common/") */
   submap: string
   diff?: FileDiffStats  // only present when --diff flag used
+  /** If set, this file is an exact duplicate of another file (by git blob SHA) */
+  duplicateOf?: string
 }
 
 /**
