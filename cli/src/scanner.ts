@@ -4,7 +4,6 @@
 import { execSync } from 'child_process'
 import { realpathSync } from 'fs'
 import pLimit from 'p-limit'
-import picomatch from 'picomatch'
 import { readFile } from 'fs/promises'
 import { join, normalize, dirname } from 'path'
 import { extractMarkerFromCode, extractMarkdownDescription } from './extract/marker.js'
@@ -16,6 +15,21 @@ import { createConsoleLogger } from './logger.js'
 import { parseCode, detectLanguage, LANGUAGE_EXTENSIONS } from './parser/index.js'
 import type { FileResult, GenerateOptions, FileDiff, FileDiffStats, SubmoduleInfo } from './types.js'
 import type { Logger } from './logger.js'
+
+let picomatchPromise: Promise<typeof import('picomatch')> | null = null
+
+async function loadPicomatch(): Promise<typeof import('picomatch')> {
+  if (!picomatchPromise) {
+    picomatchPromise = import('picomatch').then((module) => {
+      if (module && typeof module === 'object' && 'default' in module) {
+        return module.default as typeof import('picomatch')
+      }
+      return module as typeof import('picomatch')
+    })
+  }
+
+  return picomatchPromise
+}
 
 /**
  * Maximum number of files to process (safety limit)
@@ -436,6 +450,7 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
   // Filter out null/undefined/empty patterns (some CLI parsers can pass [null] when option is not used)
   const ignorePatterns = (options.ignore ?? []).filter((p): p is string => !!p)
   const filterPatterns = (options.filter ?? []).filter((p): p is string => !!p)
+  const picomatch = await loadPicomatch()
   return scanRepo({
     repoDir: dir,
     pathPrefix: '',
