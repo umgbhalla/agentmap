@@ -3,7 +3,9 @@
 
 import { execSync } from 'child_process'
 import { realpathSync } from 'fs'
+import picomatch from 'picomatch'
 import pLimit from 'p-limit'
+import ignore from 'ignore'
 import { readFile } from 'fs/promises'
 import { join, normalize, dirname } from 'path'
 import { extractMarkerFromCode, extractMarkdownDescription } from './extract/marker.js'
@@ -16,19 +18,35 @@ import { parseCode, detectLanguage, LANGUAGE_EXTENSIONS } from './parser/index.j
 import type { FileResult, GenerateOptions, FileDiff, FileDiffStats, SubmoduleInfo } from './types.js'
 import type { Logger } from './logger.js'
 
-let picomatchPromise: Promise<typeof import('picomatch')> | null = null
+type PathMatcher = (path: string) => boolean
 
-async function loadPicomatch(): Promise<typeof import('picomatch')> {
-  if (!picomatchPromise) {
-    picomatchPromise = import('picomatch').then((module) => {
-      if (module && typeof module === 'object' && 'default' in module) {
-        return module.default as typeof import('picomatch')
-      }
-      return module as typeof import('picomatch')
-    })
+const AGENTMAP_IGNORE_FILE = '.agentmapignore'
+
+function combinePathMatchers(...matchers: Array<PathMatcher | undefined>): PathMatcher | undefined {
+  const activeMatchers = matchers.filter((matcher): matcher is PathMatcher => matcher !== undefined)
+  if (activeMatchers.length === 0) {
+    return undefined
   }
 
-  return picomatchPromise
+  return (path) => {
+    for (const matcher of activeMatchers) {
+      if (matcher(path)) {
+        return true
+      }
+    }
+
+    return false
+  }
+}
+
+async function loadAgentmapIgnoreMatcher(dir: string): Promise<PathMatcher | undefined> {
+  try {
+    const file = await readFile(join(dir, AGENTMAP_IGNORE_FILE), 'utf8')
+    const matcher = ignore().add(file)
+    return (path) => matcher.ignores(normalizeRelativePath(path))
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -297,9 +315,13 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
   options.visitedRepoDirs.add(canonicalRepoDir)
 
   let submodules: SubmoduleInfo[] = []
-  const directSubmodules = options.includeSubmodules ? getSubmodules(options.repoDir) : []
+  const allDirectSubmodules = options.includeSubmodules ? getSubmodules(options.repoDir) : []
+  const directSubmodules = allDirectSubmodules.filter((submodule) => {
+    const relativePath = joinRelativePath(options.pathPrefix, submodule.path)
+    return !options.isIgnored?.(relativePath)
+  })
   const directSubmodulePathSet = options.includeSubmodules
-    ? new Set(directSubmodules.map(submodule => submodule.path))
+    ? new Set(allDirectSubmodules.map(submodule => submodule.path))
     : getSubmodulePaths(options.repoDir)
 
   if (options.includeSubmodules) {
@@ -450,7 +472,9 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
   // Filter out null/undefined/empty patterns (some CLI parsers can pass [null] when option is not used)
   const ignorePatterns = (options.ignore ?? []).filter((p): p is string => !!p)
   const filterPatterns = (options.filter ?? []).filter((p): p is string => !!p)
-  const picomatch = await loadPicomatch()
+  const agentmapIgnoreMatcher = await loadAgentmapIgnoreMatcher(dir)
+  const cliIgnoreMatcher = ignorePatterns.length > 0 ? picomatch(ignorePatterns) : undefined
+
   return scanRepo({
     repoDir: dir,
     pathPrefix: '',
@@ -458,7 +482,7 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
     includeSubmodules: options.submodules !== false,
     logger,
     isIncluded: filterPatterns.length > 0 ? picomatch(filterPatterns) : undefined,
-    isIgnored: ignorePatterns.length > 0 ? picomatch(ignorePatterns) : undefined,
+    isIgnored: combinePathMatchers(cliIgnoreMatcher, agentmapIgnoreMatcher),
     visitedRepoDirs: new Set(),
   })
 }
