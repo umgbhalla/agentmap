@@ -3,9 +3,8 @@
 
 import { execSync } from 'child_process'
 import { realpathSync } from 'fs'
-import picomatch from 'picomatch'
 import pLimit from 'p-limit'
-import ignore from 'ignore'
+import type ignoreFactory from 'ignore'
 import { readFile } from 'fs/promises'
 import { join, normalize, dirname } from 'path'
 import { extractMarkerFromCode, extractMarkdownDescription } from './extract/marker.js'
@@ -19,6 +18,32 @@ import type { FileResult, GenerateOptions, FileDiff, FileDiffStats, SubmoduleInf
 import type { Logger } from './logger.js'
 
 type PathMatcher = (path: string) => boolean
+type GlobMatcherFactory = (patterns: string | string[]) => PathMatcher
+
+let ignoreFactoryPromise: Promise<typeof ignoreFactory> | undefined
+let picomatchFactoryPromise: Promise<GlobMatcherFactory> | undefined
+
+async function getIgnoreFactory(): Promise<typeof ignoreFactory> {
+  ignoreFactoryPromise ??= import('ignore').then((module): typeof ignoreFactory => {
+    const exported = module?.default || module
+    if (typeof exported !== 'function') {
+      throw new TypeError('ignore export is not a matcher factory')
+    }
+    return exported
+  })
+  return ignoreFactoryPromise
+}
+
+async function getPicomatchFactory(): Promise<GlobMatcherFactory> {
+  picomatchFactoryPromise ??= import('picomatch').then((module): GlobMatcherFactory => {
+    const exported = module?.default || module
+    if (typeof exported !== 'function') {
+      throw new TypeError('picomatch export is not a matcher factory')
+    }
+    return exported
+  })
+  return picomatchFactoryPromise
+}
 
 const AGENTMAP_IGNORE_FILE = '.agentmapignore'
 
@@ -42,6 +67,7 @@ function combinePathMatchers(...matchers: Array<PathMatcher | undefined>): PathM
 async function loadAgentmapIgnoreMatcher(dir: string): Promise<PathMatcher | undefined> {
   try {
     const file = await readFile(join(dir, AGENTMAP_IGNORE_FILE), 'utf8')
+    const ignore = await getIgnoreFactory()
     const matcher = ignore().add(file)
     return (path) => matcher.ignores(normalizeRelativePath(path))
   } catch {
@@ -472,6 +498,7 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
   // Filter out null/undefined/empty patterns (some CLI parsers can pass [null] when option is not used)
   const ignorePatterns = (options.ignore ?? []).filter((p): p is string => !!p)
   const filterPatterns = (options.filter ?? []).filter((p): p is string => !!p)
+  const picomatch = await getPicomatchFactory()
   const agentmapIgnoreMatcher = await loadAgentmapIgnoreMatcher(dir)
   const cliIgnoreMatcher = ignorePatterns.length > 0 ? picomatch(ignorePatterns) : undefined
 

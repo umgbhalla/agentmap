@@ -1,13 +1,24 @@
 
 // OpenCode plugin that injects codebase map into system prompt.
 
+import { writeFile } from 'node:fs/promises'
 import type { Plugin } from '@opencode-ai/plugin'
 import { formatLogMessage, generateMapYaml } from 'agentmap'
 import type { Logger } from 'agentmap'
 
 const MAX_LINES = 1000
 
-export const AgentMapPlugin: Plugin = async ({ directory, client }) => {
+async function writeDebugFile(path: string | undefined, content: string) {
+  if (!path) return
+  await writeFile(path, content, 'utf8')
+}
+
+function getSessionID(input: { sessionID?: string } | null | undefined): string | undefined {
+  const sessionID = input?.sessionID
+  return typeof sessionID === 'string' ? sessionID : undefined
+}
+
+const AgentMapPlugin: Plugin = async ({ directory, client }) => {
   let cachedYaml: string | undefined
   let lastSessionID: string | undefined
 
@@ -36,7 +47,7 @@ export const AgentMapPlugin: Plugin = async ({ directory, client }) => {
 
     'experimental.chat.system.transform': async (input, output) => {
       try {
-        const sessionID = (input as { sessionID?: string }).sessionID
+        const sessionID = getSessionID(input)
 
         if (sessionID && sessionID !== lastSessionID) {
           lastSessionID = sessionID
@@ -75,9 +86,15 @@ When making significant changes to a file's purpose or responsibilities, update 
 
 These descriptions appear in the agentmap XML at the start of every agent session.
 </agentmap-instructions>`)
+
+        await writeDebugFile(process.env.AGENTMAP_DEBUG_SYSTEM_PROMPT_FILE, output.system.join('\n'))
       } catch (err) {
+        await writeDebugFile(process.env.AGENTMAP_DEBUG_ERROR_FILE, String(err))
         logger.error('[agentmap] Failed to generate map:', err)
       }
     },
   }
 }
+
+export { AgentMapPlugin }
+export default AgentMapPlugin
