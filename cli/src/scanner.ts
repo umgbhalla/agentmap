@@ -1,3 +1,4 @@
+// @agentmap:.
 // Scan directory for files with header comments/docstrings and recurse into submodules.
 
 import { execSync } from 'child_process'
@@ -5,11 +6,12 @@ import { realpathSync } from 'fs'
 import pLimit from 'p-limit'
 import type ignoreFactory from 'ignore'
 import { readFile } from 'fs/promises'
-import { join, normalize } from 'path'
+import { join, normalize, dirname } from 'path'
 import { extractMarkerFromCode, extractMarkdownDescription } from './extract/marker.js'
 import { extractDefinitions } from './extract/definitions.js'
 import { getAllDiffData, applyDiffToDefinitions } from './extract/git-status.js'
 import { getSubmodules, getSubmodulePaths } from './extract/submodules.js'
+import { parseCargoToml, getCargoDescription, isRustStructuralFile, type CargoManifest } from './extract/cargo.js'
 import { createConsoleLogger } from './logger.js'
 import { parseCode, detectLanguage, LANGUAGE_EXTENSIONS } from './parser/index.js'
 import type { FileResult, GenerateOptions, FileDiff, FileDiffStats, SubmoduleInfo } from './types.js'
@@ -196,6 +198,13 @@ export interface ScanResult {
   submodules: SubmoduleInfo[]
 }
 
+interface CrateInfo {
+  cargoPath: string
+  manifest: CargoManifest
+  sourcePrefix: string
+  description: string
+}
+
 interface ScanRepoOptions {
   repoDir: string
   pathPrefix: string
@@ -205,6 +214,13 @@ interface ScanRepoOptions {
   isIncluded?: (path: string) => boolean
   isIgnored?: (path: string) => boolean
   visitedRepoDirs: Set<string>
+}
+
+/**
+ * Check if a file is a Cargo.toml
+ */
+function isCargoToml(filepath: string): boolean {
+  return filepath === 'Cargo.toml' || filepath.endsWith('/Cargo.toml') || filepath.endsWith('\\Cargo.toml')
 }
 
 function normalizeRelativePath(path: string): string {
@@ -222,6 +238,99 @@ function getCanonicalRepoDir(dir: string): string {
   } catch {
     return dir
   }
+}
+
+/**
+ * Build a map of source prefixes to their crate info from Cargo.toml files.
+ * Only includes package crates (not workspace-only roots without a [package]).
+ */
+async function buildCrateMap(cargoFiles: string[], dir: string, pathPrefix: string): Promise<Map<string, CrateInfo>> {
+  const crateMap = new Map<string, CrateInfo>()
+
+  for (const cargoPath of cargoFiles) {
+    try {
+      const fullPath = join(dir, cargoPath)
+      const manifest = await parseCargoToml(fullPath)
+
+      if (!manifest.isPackage) continue
+
+      const cargoDir = cargoPath === 'Cargo.toml' ? '' : dirname(cargoPath).replace(/\\/g, '/') + '/'
+      const sourcePrefix = joinRelativePath(pathPrefix, cargoDir + 'src/')
+      const prefixedCargoPath = joinRelativePath(pathPrefix, cargoPath)
+
+      crateMap.set(sourcePrefix, {
+        cargoPath: prefixedCargoPath,
+        manifest,
+        sourcePrefix,
+        description: getCargoDescription(manifest),
+      })
+    } catch {
+      // Skip unparseable Cargo.toml files
+    }
+  }
+
+  return crateMap
+}
+
+/**
+ * Find the crate that owns a given file path
+ */
+function findCrateForFile(relativePath: string, crateMap: Map<string, CrateInfo>): CrateInfo | null {
+  const normalized = relativePath.replace(/\\/g, '/')
+  for (const [prefix, info] of crateMap) {
+    if (normalized.startsWith(prefix)) {
+      return info
+    }
+  }
+  return null
+}
+
+/**
+ * Resolve submap path to absolute path from project root
+ *
+ * @param submap - Submap from marker (e.g., ".", "..", "src/common")
+ * @param relativePath - File's path relative to project root
+ * @returns Resolved submap path (e.g., "./" for root, "src/common/")
+ */
+function resolveSubmap(submap: string | undefined, relativePath: string): string {
+  // No submap = root
+  if (!submap) {
+    return './'
+  }
+
+  // Get file's directory
+  const fileDir = dirname(relativePath)
+
+  // Relative submap (starts with .)
+  if (submap.startsWith('.')) {
+    // Resolve relative to file's directory
+    const resolved = normalize(join(fileDir, submap))
+    // Ensure it doesn't go above project root
+    if (resolved.startsWith('..')) {
+      return './'
+    }
+    // Normalize to ./ for root, otherwise add trailing slash
+    return resolved === '.' ? './' : resolved + '/'
+  }
+
+  // Absolute submap (from project root)
+  return submap.endsWith('/') ? submap : submap + '/'
+}
+
+function isPathIncluded(
+  relativePath: string,
+  isIncluded?: (path: string) => boolean,
+  isIgnored?: (path: string) => boolean
+): boolean {
+  if (isIncluded && !isIncluded(relativePath)) {
+    return false
+  }
+
+  if (isIgnored && isIgnored(relativePath)) {
+    return false
+  }
+
+  return true
 }
 
 async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
@@ -258,27 +367,27 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
   // Build duplicate map before filtering (needs all files to detect dupes)
   const duplicateOf = buildDuplicateMap(allGitFiles, options.pathPrefix)
 
-  let gitFiles = allGitFiles.filter(f => !normalizedSubmodulePaths.has(f.path))
-  gitFiles = gitFiles.filter(f => isSupportedFile(f.path) || isReadmeFile(f.path))
+  let gitFiles = allGitFiles.filter(file => !normalizedSubmodulePaths.has(file.path))
 
-  gitFiles = gitFiles.filter(f => {
-    const relativePath = joinRelativePath(options.pathPrefix, f.path)
+  const cargoTomlFiles = gitFiles
+    .map(file => file.path)
+    .filter(file => {
+      const relativePath = joinRelativePath(options.pathPrefix, file)
+      return isCargoToml(file) && isPathIncluded(relativePath, options.isIncluded, options.isIgnored)
+    })
 
-    if (options.isIncluded && !options.isIncluded(relativePath)) {
-      return false
-    }
-
-    if (options.isIgnored && options.isIgnored(relativePath)) {
-      return false
-    }
-
-    return true
+  gitFiles = gitFiles.filter(file => isSupportedFile(file.path) || isReadmeFile(file.path))
+  gitFiles = gitFiles.filter(file => {
+    const relativePath = joinRelativePath(options.pathPrefix, file.path)
+    return isPathIncluded(relativePath, options.isIncluded, options.isIgnored)
   })
 
   if (gitFiles.length > MAX_FILES) {
-    options.logger?.warn(`Warning: Too many files (${gitFiles.length} > ${MAX_FILES}), skipping scan`)
+    options.logger.warn(`Warning: Too many files (${gitFiles.length} > ${MAX_FILES}), skipping scan`)
     return { files: [], submodules }
   }
+
+  const crateMap = await buildCrateMap(cargoTomlFiles, options.repoDir, options.pathPrefix)
 
   let fileStats: Map<string, FileDiffStats> | null = null
   let fileDiffs: Map<string, FileDiff> | null = null
@@ -291,6 +400,35 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
     } catch {
       fileStats = null
       fileDiffs = null
+    }
+  }
+
+  const cargoResults: FileResult[] = []
+  for (const cargoPath of cargoTomlFiles) {
+    const prefixedCargoPath = joinRelativePath(options.pathPrefix, cargoPath)
+    const crate = [...crateMap.values()].find(c => c.cargoPath === prefixedCargoPath)
+
+    if (crate) {
+      cargoResults.push({
+        relativePath: prefixedCargoPath,
+        description: crate.description,
+        definitions: [],
+        submap: resolveSubmap(undefined, prefixedCargoPath),
+      })
+    } else {
+      try {
+        const manifest = await parseCargoToml(join(options.repoDir, cargoPath))
+        if (manifest.isWorkspace) {
+          cargoResults.push({
+            relativePath: prefixedCargoPath,
+            description: getCargoDescription(manifest),
+            definitions: [],
+            submap: resolveSubmap(undefined, prefixedCargoPath),
+          })
+        }
+      } catch {
+        // Skip
+      }
     }
   }
 
@@ -311,9 +449,10 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
             relativePath: prefixedRelativePath,
             duplicateOf: dupOriginal,
             definitions: [],
+            submap: resolveSubmap(undefined, prefixedRelativePath),
           } satisfies FileResult
         }
-        return await processFile(fullPath, prefixedRelativePath, fileDiff, stats)
+        return await processFile(fullPath, prefixedRelativePath, fileDiff, stats, crateMap)
       } catch {
         return null
       }
@@ -342,6 +481,7 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
 
   return {
     files: [
+      ...cargoResults,
       ...results.filter((result): result is FileResult => result !== null),
       ...nestedResults.flatMap(result => result.files),
     ],
@@ -355,6 +495,7 @@ async function scanRepo(options: ScanRepoOptions): Promise<ScanResult> {
 export async function scanDirectory(options: GenerateOptions = {}): Promise<ScanResult> {
   const dir = options.dir ?? process.cwd()
   const logger = options.logger ?? createConsoleLogger()
+  // Filter out null/undefined/empty patterns (some CLI parsers can pass [null] when option is not used)
   const ignorePatterns = (options.ignore ?? []).filter((p): p is string => !!p)
   const filterPatterns = (options.filter ?? []).filter((p): p is string => !!p)
   const picomatch = await getPicomatchFactory()
@@ -374,13 +515,15 @@ export async function scanDirectory(options: GenerateOptions = {}): Promise<Scan
 }
 
 /**
- * Process a single file - check for marker and extract definitions
+ * Process a single file - check for marker and extract definitions.
+ * For .rs files in known Cargo crates, auto-includes even without header comments.
  */
 async function processFile(
   fullPath: string,
   relativePath: string,
   fileDiff?: FileDiff,
-  fileStats?: FileDiffStats
+  fileStats?: FileDiffStats,
+  crateMap?: Map<string, CrateInfo>
 ): Promise<FileResult | null> {
   // Handle README.md files specially
   if (isReadmeFile(relativePath)) {
@@ -392,6 +535,7 @@ async function processFile(
       relativePath,
       description,
       definitions: [],
+      submap: resolveSubmap(undefined, relativePath),
       diff: fileStats,
     }
   }
@@ -407,8 +551,52 @@ async function processFile(
 
   // Check for marker using the code we already read
   const marker = await extractMarkerFromCode(code, language)
+
+  // If no marker found, check if this is a .rs file in a known crate
   if (!marker.found) {
-    return null
+    if (language !== 'rust' || !crateMap?.size) {
+      return null
+    }
+
+    const crate = findCrateForFile(relativePath, crateMap)
+    if (!crate) {
+      return null
+    }
+
+    // Parse for definitions using the code we already read
+    const tree = await parseCode(code, language)
+    let definitions = extractDefinitions(tree.rootNode, language)
+
+    if (fileDiff) {
+      definitions = applyDiffToDefinitions(definitions, fileDiff)
+    }
+
+    // Auto-include: structural files always, others only if they have definitions
+    const isStructural = isRustStructuralFile(relativePath)
+    if (!isStructural && definitions.length === 0) {
+      return null
+    }
+
+    // Use crate description for entry points, module name for mod.rs
+    let description: string | undefined
+    const basename = relativePath.split(/[/\\]/).pop()
+    if (basename === 'main.rs' || basename === 'lib.rs') {
+      const kind = basename === 'main.rs' ? 'Binary' : 'Library'
+      description = `${kind} entry point for ${crate.manifest.packageName}`
+    } else if (basename === 'mod.rs') {
+      const parentDir = relativePath.split(/[/\\]/).slice(-2, -1)[0]
+      if (parentDir) {
+        description = `Module: ${parentDir}`
+      }
+    }
+
+    return {
+      relativePath,
+      description,
+      definitions,
+      submap: resolveSubmap(undefined, relativePath),
+      diff: fileStats,
+    }
   }
 
   // Parse and extract definitions using the same code
@@ -420,10 +608,14 @@ async function processFile(
     definitions = applyDiffToDefinitions(definitions, fileDiff)
   }
 
+  // Resolve submap
+  const submap = resolveSubmap(marker.submap, relativePath)
+
   return {
     relativePath,
     description: marker.description,
     definitions,
+    submap,
     // Use pre-calculated file stats from --numstat (more reliable)
     diff: fileStats,
   }

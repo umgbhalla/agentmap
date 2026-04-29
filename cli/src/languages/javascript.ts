@@ -1,3 +1,4 @@
+// @agentmap:.
 // JavaScript language support for agentmap.
 // Shares most implementation with TypeScript.
 

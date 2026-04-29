@@ -1,3 +1,4 @@
+// @agentmap:.
 // Go language support for agentmap.
 
 import type { SyntaxNode } from '../types.js'

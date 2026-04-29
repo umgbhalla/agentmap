@@ -1,3 +1,4 @@
+// @agentmap:.
 // Format map object to YAML string.
 
 import type { MapNode } from '../types.js'

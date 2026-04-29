@@ -1,3 +1,4 @@
+// @agentmap:.
 // Shared logger abstraction used by CLI and integrations.
 
 export interface Logger {

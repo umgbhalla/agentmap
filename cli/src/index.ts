@@ -1,3 +1,4 @@
+// @agentmap:.
 // Library exports for programmatic usage.
 
 import { execSync } from 'child_process'
@@ -7,7 +8,8 @@ import { scanDirectory } from './scanner.js'
 import { buildMap, getRootName } from './map/builder.js'
 import { toYaml } from './map/yaml.js'
 import { truncateMap } from './map/truncate.js'
-import type { GenerateOptions, MapNode } from './types.js'
+import { generateSubmapOutputs, writeSubmapOutputs, groupBySubmap, getSubmapSummary } from './submaps.js'
+import type { GenerateOptions, MapNode, SubmapOutputOptions } from './types.js'
 
 export { toYaml } from './map/yaml.js'
 export { truncateMap, truncateDefs } from './map/truncate.js'
@@ -32,7 +34,13 @@ export type {
   SubmoduleEntry,
   SubmoduleInfo,
   SubmoduleNode,
+  OutputFormat,
+  SubmapOutputOptions,
+  SubmapFiles,
+  SubmapOutput,
 } from './types.js'
+
+export { scanDirectory, groupBySubmap, generateSubmapOutputs, writeSubmapOutputs, getSubmapSummary }
 
 /**
  * Check if directory is inside a git repository
@@ -72,7 +80,7 @@ export async function generateMap(options: GenerateOptions = {}): Promise<MapNod
 
   const { files, submodules } = await scanDirectory({ ...options, dir })
   const map = buildMap(files, rootName, submodules)
-  
+
   // Apply truncation
   const maxDefs = options.maxDefs ?? DEFAULT_MAX_DEFS
   return truncateMap(map, { maxDefs, maxDescChars: options.maxDescChars })
@@ -98,9 +106,54 @@ export async function generateMapYaml(options: GenerateOptions = {}): Promise<st
 
   const rootName = getRootName(dir)
   const map = buildMap(files, rootName, submodules)
-  
+
   // Apply truncation
   const maxDefs = options.maxDefs ?? DEFAULT_MAX_DEFS
   const truncated = truncateMap(map, { maxDefs, maxDescChars: options.maxDescChars })
   return toYaml(truncated)
+}
+
+/**
+ * Options for generating submaps
+ */
+export interface GenerateSubmapOptions extends GenerateOptions, SubmapOutputOptions {}
+
+/**
+ * Result of generating submaps
+ */
+export interface GenerateSubmapResult {
+  /** Number of files processed */
+  fileCount: number
+  /** Number of submaps written */
+  submapCount: number
+}
+
+/**
+ * Generate submap files
+ */
+export async function generateSubmaps(
+  options: GenerateSubmapOptions = {}
+): Promise<GenerateSubmapResult> {
+  const dir = resolve(options.dir ?? '.')
+  const { files } = await scanDirectory({ ...options, dir })
+
+  if (files.length === 0) {
+    return { fileCount: 0, submapCount: 0 }
+  }
+
+  const outputs = generateSubmapOutputs(files, dir, {
+    outDir: options.outDir,
+    outputFile: options.outputFile,
+    format: options.format,
+  })
+
+  await writeSubmapOutputs(outputs, {
+    dryRun: options.dryRun,
+    verbose: options.verbose,
+  })
+
+  return {
+    fileCount: files.length,
+    submapCount: outputs.length,
+  }
 }
